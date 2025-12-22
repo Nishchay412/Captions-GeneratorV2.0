@@ -16,10 +16,7 @@ async function getJob(jobId: string): Promise<CaptionJob> {
 }
 
 async function startWorker(jobId: string) {
-  // Your Go worker endpoint
-  const res = await fetch(`http://localhost:8081/process?jobId=${jobId}`, {
-    method: "POST",
-  });
+  const res = await fetch(`/api/jobs/${jobId}/start`, { method: "POST" });
   if (!res.ok) throw new Error("Failed to start worker");
 }
 

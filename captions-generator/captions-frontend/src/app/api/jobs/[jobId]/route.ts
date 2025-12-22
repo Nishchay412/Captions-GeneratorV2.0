@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getJob, updateJob } from "@/lib/inMemoryJobs";
+import { getJob, updateJob } from "@/lib/dynamoJobs";
 import type { CaptionJob, JobStage, JobStatus } from "@/lib/job";
 
 type Ctx = { params: Promise<{ jobId: string }> };
