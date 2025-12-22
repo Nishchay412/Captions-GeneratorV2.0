@@ -61,6 +61,22 @@ func runFakePipeline(nextBaseURL, jobID string) {
 	}
 }
 
+func withCORS(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
+		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+
+		// Handle preflight
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		h(w, r)
+	}
+}
+
 func main() {
 	// Change this if your Next server is not on 3000
 	nextBaseURL := "http://localhost:3000"
@@ -71,7 +87,7 @@ func main() {
 
 	// Call this to start fake processing:
 	// POST http://localhost:8081/process?jobId=<jobId>
-	http.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/process", withCORS(func(w http.ResponseWriter, r *http.Request) {
 		jobID := r.URL.Query().Get("jobId")
 		if jobID == "" {
 			http.Error(w, "missing jobId", http.StatusBadRequest)
@@ -81,7 +97,7 @@ func main() {
 		go runFakePipeline(nextBaseURL, jobID)
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprintf(w, "started processing job %s\n", jobID)
-	})
+	}))
 
 	addr := ":8081"
 	log.Printf("worker listening on %s", addr)

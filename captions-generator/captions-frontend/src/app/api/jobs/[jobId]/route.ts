@@ -2,27 +2,33 @@ import { NextResponse } from "next/server";
 import { getJob, updateJob } from "@/lib/inMemoryJobs";
 import type { CaptionJob, JobStage, JobStatus } from "@/lib/job";
 
-export async function GET(
-  _req: Request,
-  { params }: { params: { jobId: string } }
-) {
-  const job = getJob(params.jobId);
+type Ctx = { params: Promise<{ jobId: string }> };
+
+export async function GET(_req: Request, { params }: Ctx) {
+  const { jobId } = await params;
+
+  const job = getJob(jobId);
   if (!job) return NextResponse.json({ error: "Job not found" }, { status: 404 });
   return NextResponse.json(job);
 }
 
-export async function PATCH(
-  req: Request,
-  { params }: { params: { jobId: string } }
-) {
-  const existing = getJob(params.jobId);
+export async function PATCH(req: Request, { params }: Ctx) {
+  const { jobId } = await params;
+
+  const existing = getJob(jobId);
   if (!existing) return NextResponse.json({ error: "Job not found" }, { status: 404 });
 
   const body = (await req.json()) as Partial<CaptionJob>;
 
-  // Basic guardrails so random junk doesn't get stored
   const allowedStatuses: JobStatus[] = ["QUEUED", "PROCESSING", "COMPLETED", "FAILED"];
-  const allowedStages: JobStage[] = ["UPLOAD", "DISPATCH", "EXTRACT_AUDIO", "TRANSCRIBE", "EMBED", "DONE"];
+  const allowedStages: JobStage[] = [
+    "UPLOAD",
+    "DISPATCH",
+    "EXTRACT_AUDIO",
+    "TRANSCRIBE",
+    "EMBED",
+    "DONE",
+  ];
 
   if (body.status && !allowedStatuses.includes(body.status)) {
     return NextResponse.json({ error: "Invalid status" }, { status: 400 });
@@ -31,8 +37,6 @@ export async function PATCH(
     return NextResponse.json({ error: "Invalid stage" }, { status: 400 });
   }
 
-  const updated = updateJob(params.jobId, body);
+  const updated = updateJob(jobId, body);
   return NextResponse.json(updated);
 }
-
-
