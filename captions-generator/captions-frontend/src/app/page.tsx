@@ -14,6 +14,39 @@ async function getJob(jobId: string): Promise<CaptionJob> {
   if (!res.ok) throw new Error("Failed to fetch job");
   return res.json();
 }
+async function uploadVideoToS3(jobId: string, file: File) {
+  // 1) get signed URL
+  const presignRes = await fetch("/api/uploads/presign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jobId,
+      fileName: file.name,
+      contentType: file.type || "application/octet-stream",
+    }),
+  });
+  if (!presignRes.ok) throw new Error("Failed to presign upload");
+  const { url, key } = await presignRes.json();
+
+  // 2) upload to S3
+  const putRes = await fetch(url, {
+    method: "PUT",
+    headers: { "Content-Type": file.type || "application/octet-stream" },
+    body: file,
+  });
+  if (!putRes.ok) throw new Error("Upload to S3 failed");
+
+  // 3) save inputKey on the job
+  const patchRes = await fetch(`/api/jobs/${jobId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ inputKey: key, stage: "DISPATCH" }),
+  });
+  if (!patchRes.ok) throw new Error("Failed to attach inputKey to job");
+
+  return key;
+}
+
 
 async function startWorker(jobId: string) {
   const res = await fetch(`/api/jobs/${jobId}/start`, { method: "POST" });
