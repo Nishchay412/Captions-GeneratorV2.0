@@ -129,6 +129,16 @@ export default function Home() {
       </div>
 
       <div className="rounded-xl border p-4 space-y-2">
+          <input
+              type="file"
+              accept="video/*"
+              onChange={async (e) => {
+                if (!job) return;
+                const file = e.target.files?.[0];
+                if (!file) return;
+                await uploadVideoToS3(job.jobId, file);
+              }}
+    />
         <h2 className="font-medium">Job Status</h2>
         {!job ? (
           <p className="text-sm text-gray-600">No job yet.</p>
