@@ -2,12 +2,26 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+type CaptionJob struct {
+	JobID    string `json:"jobId"`
+	Status   string `json:"status"`
+	Stage    string `json:"stage"`
+	InputKey string `json:"inputKey"`
+}
 
 type PatchJobRequest struct {
 	Status    string `json:"status,omitempty"`
@@ -41,63 +55,116 @@ func patchJob(nextBaseURL, jobID string, patch PatchJobRequest) error {
 	return nil
 }
 
-// Simulate the pipeline stages (later this becomes FFmpeg + Transcribe + S3 uploads)
-func runFakePipeline(nextBaseURL, jobID string) {
-	steps := []PatchJobRequest{
-		{Status: "PROCESSING", Stage: "DISPATCH"},
-		{Status: "PROCESSING", Stage: "EXTRACT_AUDIO"},
-		{Status: "PROCESSING", Stage: "TRANSCRIBE"},
-		{Status: "PROCESSING", Stage: "EMBED"},
-		{Status: "COMPLETED", Stage: "DONE", OutputKey: "local/output/demo-captioned.mp4"},
+func getJob(nextBaseURL, jobID string) (*CaptionJob, error) {
+	url := fmt.Sprintf("%s/api/jobs/%s", nextBaseURL, jobID)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("get job failed: %s", resp.Status)
 	}
 
-	for _, step := range steps {
-		time.Sleep(2 * time.Second)
-		if err := patchJob(nextBaseURL, jobID, step); err != nil {
-			log.Printf("job %s update error: %v", jobID, err)
-			return
-		}
-		log.Printf("job %s -> status=%s stage=%s", jobID, step.Status, step.Stage)
+	var job CaptionJob
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return nil, err
 	}
+	return &job, nil
 }
 
-func withCORS(h http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:3000")
-		w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-
-		// Handle preflight
-		if r.Method == http.MethodOptions {
-			w.WriteHeader(http.StatusNoContent)
-			return
-		}
-
-		h(w, r)
+func downloadFromS3(ctx context.Context, s3c *s3.Client, bucket, key, destPath string) error {
+	out, err := s3c.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: &bucket,
+		Key:    &key,
+	})
+	if err != nil {
+		return err
 	}
+	defer out.Body.Close()
+
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return err
+	}
+
+	f, err := os.Create(destPath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	_, err = io.Copy(f, out.Body)
+	return err
+}
+
+func runPipeline(nextBaseURL string, s3c *s3.Client, bucket, jobID string) {
+	ctx := context.Background()
+
+	// stage: dispatch
+	_ = patchJob(nextBaseURL, jobID, PatchJobRequest{Status: "PROCESSING", Stage: "DISPATCH"})
+	time.Sleep(300 * time.Millisecond)
+
+	job, err := getJob(nextBaseURL, jobID)
+	if err != nil {
+		log.Printf("job %s read error: %v", jobID, err)
+		_ = patchJob(nextBaseURL, jobID, PatchJobRequest{Status: "FAILED", Stage: "DISPATCH", Error: err.Error()})
+		return
+	}
+
+	if job.InputKey == "" {
+		err := fmt.Errorf("missing inputKey on job (upload not completed)")
+		log.Printf("job %s error: %v", jobID, err)
+		_ = patchJob(nextBaseURL, jobID, PatchJobRequest{Status: "FAILED", Stage: "DISPATCH", Error: err.Error()})
+		return
+	}
+
+	// stage: "download"
+	_ = patchJob(nextBaseURL, jobID, PatchJobRequest{Status: "PROCESSING", Stage: "EXTRACT_AUDIO"})
+
+	dest := filepath.Join("tmp", fmt.Sprintf("%s.mp4", jobID))
+	if err := downloadFromS3(ctx, s3c, bucket, job.InputKey, dest); err != nil {
+		log.Printf("job %s s3 download error: %v", jobID, err)
+		_ = patchJob(nextBaseURL, jobID, PatchJobRequest{Status: "FAILED", Stage: "EXTRACT_AUDIO", Error: err.Error()})
+		return
+	}
+
+	log.Printf("job %s downloaded input to %s", jobID, dest)
+
+	// for now, just mark done
+	_ = patchJob(nextBaseURL, jobID, PatchJobRequest{Status: "COMPLETED", Stage: "DONE", OutputKey: "local/tmp/" + jobID + ".mp4"})
 }
 
 func main() {
-	// Change this if your Next server is not on 3000
 	nextBaseURL := "http://localhost:3000"
+	region := os.Getenv("AWS_REGION")
+	bucket := os.Getenv("S3_BUCKET_NAME")
+
+	if region == "" || bucket == "" {
+		log.Fatal("Missing AWS_REGION or S3_BUCKET_NAME env vars")
+	}
+
+	cfg, err := config.LoadDefaultConfig(context.Background(), config.WithRegion(region))
+	if err != nil {
+		log.Fatalf("aws config error: %v", err)
+	}
+	s3c := s3.NewFromConfig(cfg)
 
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
 
-	// Call this to start fake processing:
-	// POST http://localhost:8081/process?jobId=<jobId>
-	http.HandleFunc("/process", withCORS(func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/process", func(w http.ResponseWriter, r *http.Request) {
 		jobID := r.URL.Query().Get("jobId")
 		if jobID == "" {
 			http.Error(w, "missing jobId", http.StatusBadRequest)
 			return
 		}
 
-		go runFakePipeline(nextBaseURL, jobID)
+		go runPipeline(nextBaseURL, s3c, bucket, jobID)
 		w.WriteHeader(http.StatusAccepted)
 		fmt.Fprintf(w, "started processing job %s\n", jobID)
-	}))
+	})
 
 	addr := ":8081"
 	log.Printf("worker listening on %s", addr)
